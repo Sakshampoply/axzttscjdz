@@ -1,0 +1,55 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: gridbricks
+      POSTGRES_PASSWORD: gridbricks
+      POSTGRES_DB: gridbricks
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gridbricks -d gridbricks"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  migrate:
+    build:
+      context: .
+      target: backend
+    command: ["python", "-m", "app.cli", "migrate"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://gridbricks:gridbricks@db:5432/gridbricks
+    depends_on:
+      db:
+        condition: service_healthy
+  web:
+    build:
+      context: .
+      target: web
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      DATABASE_URL: postgresql+psycopg://gridbricks:gridbricks@db:5432/gridbricks
+      PORT: 8080
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+  worker:
+    build:
+      context: .
+      target: worker
+    command: ["python", "-m", "app.cli", "worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://gridbricks:gridbricks@db:5432/gridbricks
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+volumes:
+  pgdata:

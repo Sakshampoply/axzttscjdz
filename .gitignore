@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.local/
+.env
+frontend/node_modules/
+frontend/dist/
+coverage/
+playwright-report/
+test-results/
+*.log
+frontend/*.tsbuildinfo
+.vercel/
+.DS_Store
