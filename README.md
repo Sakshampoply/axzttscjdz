@@ -2,6 +2,8 @@
 
 Wind forecast intelligence for day-ahead electricity decisions in Great Britain.
 
+**[Open the deployed application](https://gridbricks-wind.vercel.app)** · [Walkthrough video (MP4)](docs/media/walkthrough.mp4) · [Deployment status](docs/DEPLOYMENT_STATUS.md)
+
 GridBricks keeps checking Elexon, remembers each forecast version, and compares the forecast available at a decision cutoff with actual wind generation. It supports both current forecasts and historical replay. January 2026 is a demonstration preset, not a hardcoded operating period.
 
 ## What users can do
