@@ -7,7 +7,7 @@ from datetime import date, datetime, time
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -20,7 +20,7 @@ from app.analytics import METHOD_VERSION, accuracy_analysis, forecast_analysis
 from app.config import settings
 from app.db import engine, get_session
 from app.models import AnalysisRun, SyncJob, SyncState, WindActual, WindForecast
-from app.sync import enqueue, queue_lock
+from app.sync import enqueue, queue_lock, run_bounded_jobs
 from app.timeutils import aware, iso, utcnow
 
 log = logging.getLogger(__name__)
@@ -71,7 +71,12 @@ def request_refresh(session: Session, *, cooldown=True) -> SyncJob:
     return enqueue(session, "refresh")
 
 
-def refresh_if_stale():
+def schedule_runner(background_tasks: BackgroundTasks):
+    if settings().request_driven_sync:
+        background_tasks.add_task(run_bounded_jobs)
+
+
+def refresh_if_stale(background_tasks: BackgroundTasks):
     with Session(engine()) as session:
         states = session.scalars(select(SyncState)).all()
         stale = len(states) < 2 or any(
@@ -82,6 +87,7 @@ def refresh_if_stale():
         if stale:
             request_refresh(session)
             session.commit()
+    schedule_runner(background_tasks)
 
 
 @app.get("/health")
@@ -92,6 +98,7 @@ def health(session: Session = Depends(get_session)):
 
 @app.get("/api/forecast")
 def forecast(
+    background_tasks: BackgroundTasks,
     mode: Literal["current", "replay"] = "current",
     decision_date: date | None = None,
     decision_time: time = time(9),
@@ -102,7 +109,7 @@ def forecast(
     evaluation_at: datetime | None = None,
     session: Session = Depends(get_session),
 ):
-    refresh_if_stale()
+    refresh_if_stale(background_tasks)
     return forecast_analysis(
         session,
         mode=mode,
@@ -139,6 +146,7 @@ def forecast_history(
 
 @app.get("/api/accuracy")
 def accuracy(
+    background_tasks: BackgroundTasks,
     start: date,
     end: date,
     decision_time: time = time(9),
@@ -148,7 +156,7 @@ def accuracy(
     evaluation_at: datetime | None = None,
     session: Session = Depends(get_session),
 ):
-    refresh_if_stale()
+    refresh_if_stale(background_tasks)
     return accuracy_analysis(
         session,
         start=start,
@@ -207,6 +215,7 @@ def data_quality(session: Session = Depends(get_session)):
         "jobs": [job_dict(j) for j in jobs],
         "failed_jobs": failures,
         "sync_interval_seconds": settings().sync_interval_seconds,
+        "sync_mode": "scheduled_requests" if settings().request_driven_sync else "worker",
         "scope": "GB operational wind: WINDFOR and FUELHH WIND only",
     }
 
@@ -224,10 +233,11 @@ def job_dict(job):
 
 
 @app.post("/api/refresh", status_code=202)
-def refresh(session: Session = Depends(get_session)):
+def refresh(background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
     job = request_refresh(session)
     result = job_dict(job)
     session.commit()
+    schedule_runner(background_tasks)
     return result
 
 

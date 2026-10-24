@@ -22,6 +22,29 @@ def test_refresh_endpoint_coalesces_public_requests():
         assert client.get(f"/api/jobs/{first['id']}").json()["status"] == "pending"
 
 
+def test_free_host_requests_start_bounded_runner_after_queue_commit(monkeypatch):
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from app.config import settings
+    from app.db import engine
+    from app.models import SyncJob
+
+    monkeypatch.setenv("REQUEST_DRIVEN_SYNC", "true")
+    settings.cache_clear()
+    observed = []
+
+    def run():
+        with Session(engine()) as session:
+            observed.append(session.scalar(select(SyncJob.id).where(SyncJob.active_key == "refresh")))
+
+    monkeypatch.setattr("app.main.run_bounded_jobs", run)
+    with TestClient(app) as client:
+        job = client.post("/api/refresh").json()
+        assert observed == [job["id"]]
+        assert client.get("/api/data-quality").json()["sync_mode"] == "scheduled_requests"
+
+
 def test_export_freezes_exact_visible_analysis(seed):
     seed("forecast", "2026-01-02T00:00Z", "2026-01-01T07:30Z", 100)
     seed("actual", "2026-01-02T00:00Z", "2026-01-02T00:30Z", 80)

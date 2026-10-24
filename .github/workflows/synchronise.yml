@@ -1,0 +1,24 @@
+name: Synchronise Elexon
+on:
+  schedule:
+    # Offset from the top of the hour. GitHub schedules are best effort.
+    - cron: '3-58/5 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: elexon-synchronise
+  cancel-in-progress: false
+jobs:
+  refresh:
+    if: vars.RENDER_API_URL != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Request the shared durable refresh job
+        env:
+          API_ORIGIN: ${{ vars.RENDER_API_URL }}
+        run: >-
+          curl --fail-with-body --silent --show-error
+          --connect-timeout 30 --max-time 60 --retry 2 --retry-delay 5
+          -X POST "$API_ORIGIN/api/refresh"

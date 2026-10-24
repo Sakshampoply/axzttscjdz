@@ -12,7 +12,7 @@ Show the current dashboard, publication time, and data status.
 
 ### 00:35 to 01:10 Continuous updates
 
-“The app checks Elexon every two minutes, stores each forecast version, and refreshes the screen every thirty seconds. The worker keeps running when the browser is closed. Publication time and last checked are separate: an unchanged forecast can still be the latest one. Check for updates shares a background job across users.”
+“A GitHub schedule targets checks every five minutes, stores each forecast version, and refreshes the screen every thirty seconds. Scheduled collection works with the browser closed. This free deployment can experience cold starts, quota limits, and scheduler delays. Publication time and last checked are separate: an unchanged forecast can still be the latest one. Check for updates shares a background job across users.”
 
 Open Data status, then close it.
 
@@ -52,7 +52,7 @@ Return to Forecast and export CSV.
 
 Show the README architecture diagram.
 
-“React is served on Vercel. FastAPI, a separate Python worker, and PostgreSQL run on Render. The browser does not call Elexon. PostgreSQL is a continuously updated record of forecasts, rather than a one-time cache.”
+“React is served on Vercel. FastAPI and PostgreSQL use free Render services. Scheduled requests run a bounded processor in the API; the same code also supports a separate local Docker worker. Free Render PostgreSQL expires after thirty days, so longer operation requires a replacement database. The browser does not call Elexon. PostgreSQL is a continuously updated record of forecasts, rather than a one-time cache.”
 
 ### 04:45 to 05:40 Reliable ingestion
 

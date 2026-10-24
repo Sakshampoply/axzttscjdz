@@ -1,6 +1,7 @@
 import contextlib
 import logging
 import math
+import threading
 import time as time_module
 import uuid
 from collections.abc import Iterator
@@ -18,6 +19,7 @@ from app.timeutils import aware, iso, parse_time, utcnow
 log = logging.getLogger(__name__)
 DATASETS = ("WINDFOR", "FUELHH")
 LOCK_IDS = {"WINDFOR": 714001, "FUELHH": 714002, "queue": 714003}
+RUNNER_LOCK = threading.Lock()
 
 
 @contextlib.contextmanager
@@ -319,24 +321,75 @@ def process_job(job_id: int, owner: str) -> None:
         session.commit()
 
 
+def bootstrap_jobs(session: Session) -> None:
+    """Queue durable imports once, then reconcile recent history at most daily."""
+    if (
+        settings().bootstrap_demo
+        and session.scalar(
+            select(SyncJob.id)
+            .where(SyncJob.kind == "backfill", SyncJob.payload["day"].as_string() == "2026-01-01")
+            .limit(1)
+        )
+        is None
+    ):
+        enqueue_history(session, date(2025, 12, 30), date(2026, 2, 1))
+    last = session.scalar(
+        select(SyncJob.created_at)
+        .where(
+            SyncJob.kind == "backfill",
+            SyncJob.payload["day"].as_string() >= (utcnow().date() - timedelta(days=2)).isoformat(),
+        )
+        .order_by(SyncJob.created_at.desc())
+        .limit(1)
+    )
+    if last is None or utcnow() - aware(last) >= timedelta(days=1):
+        today = utcnow().date()
+        enqueue_history(session, today - timedelta(days=settings().bootstrap_history_days + 2), today)
+
+
+def run_bounded_jobs() -> None:
+    """Free-host runner: no resident loop; durable leases survive process termination.
+
+    The time budget is checked between jobs. A single HTTP operation may finish
+    after that budget. Dataset locks also protect against a standalone worker.
+    """
+    if not RUNNER_LOCK.acquire(blocking=False):
+        return
+    try:
+        with engine().connect() as connection:
+            postgres = connection.dialect.name == "postgresql"
+            if postgres:
+                acquired = connection.scalar(text("SELECT pg_try_advisory_lock(714005)"))
+                connection.commit()
+                if not acquired:
+                    return
+            try:
+                with Session(engine()) as session:
+                    queue_lock(session)
+                    bootstrap_jobs(session)
+                    session.commit()
+                owner = str(uuid.uuid4())
+                deadline = time_module.monotonic() + settings().request_job_budget_seconds
+                while time_module.monotonic() < deadline:
+                    job_id = claim_job(owner)
+                    if job_id is None:
+                        break
+                    process_job(job_id, owner)
+            finally:
+                if postgres:
+                    connection.execute(text("SELECT pg_advisory_unlock(714005)"))
+                    connection.commit()
+    except Exception:
+        log.exception("Bounded synchronisation runner failed; persisted jobs remain recoverable")
+    finally:
+        RUNNER_LOCK.release()
+
+
 def worker() -> None:
     owner = str(uuid.uuid4())
     with Session(engine()) as session:
         enqueue(session, "refresh")
-        if (
-            settings().bootstrap_demo
-            and session.scalar(
-                select(SyncJob.id)
-                .where(SyncJob.kind == "backfill", SyncJob.payload["day"].as_string() == "2026-01-01")
-                .limit(1)
-            )
-            is None
-        ):
-            enqueue_history(session, date(2025, 12, 30), date(2026, 2, 1))
-        # Bootstrap runs once per database; persisted daily jobs survive worker restarts.
-        if session.scalar(select(SyncJob.id).where(SyncJob.kind == "backfill").limit(1)) is None:
-            today = utcnow().date()
-            enqueue_history(session, today - timedelta(days=settings().bootstrap_history_days + 2), today)
+        bootstrap_jobs(session)
         session.commit()
     next_tick = 0.0
     next_reconcile = 0.0

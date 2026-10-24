@@ -83,7 +83,8 @@ Omit `--enqueue` for a foreground import. The demo command is safe to repeat whi
 
 ```mermaid
 flowchart LR
-    E[Elexon WINDFOR and FUELHH WIND] --> W[Independent Python worker]
+    G[GitHub schedule: five minutes] --> API
+    E[Elexon WINDFOR and FUELHH WIND] --> W[Bounded Python sync runner]
     W --> DB[(PostgreSQL)]
     U[React frontend on Vercel] --> API[FastAPI on Render]
     API --> DB
@@ -93,7 +94,7 @@ flowchart LR
     Q --> W
 ```
 
-The worker checks the upstream APIs every two minutes. The browser refetches every 30 seconds. A stale page read also queues a refresh; simultaneous refresh requests share one active job. Repeated public refreshes are coalesced during a 60-second cooldown.
+The free hosted deployment uses a five-minute GitHub schedule and request-triggered bounded sync jobs inside the Render API. Local Docker uses an independent two-minute worker with the same queue and ingestion code. The browser refetches every 30 seconds. Free-host sleep, quotas, and scheduler delays prevent a guaranteed freshness SLA. A stale page read also queues a refresh; simultaneous refresh requests share one active job. Repeated public refreshes are coalesced during a 60-second cooldown.
 
 Jobs use `FOR UPDATE SKIP LOCKED`, expiring leases, and bounded retry times. Session advisory locks prevent overlapping fetches for the same dataset. Source `Retry-After` is honoured. Long outages create daily recovery jobs while current windows are prioritised. Recent history is reconciled daily to recover revisions and late records.
 
@@ -144,7 +145,7 @@ Historical errors are measured evidence, not guaranteed future uncertainty bound
 
 ## Deployment
 
-Target architecture: **Vercel frontend + Render API, worker, and PostgreSQL**. See [deployment guide](docs/DEPLOYMENT.md) for resource setup, environment variables, migration ordering, CORS, seeding, and public checks.
+Deployed architecture: **Vercel frontend + free Render API and PostgreSQL + GitHub scheduled refreshes**. No paid worker is provisioned. Free Render PostgreSQL expires after 30 days; this build’s instance expires 23 November 2026. See [deployment guide](docs/DEPLOYMENT.md) for resource setup, environment variables, migration ordering, CORS, seeding, and public checks.
 
 Deployment URLs are recorded in [deployment status](docs/DEPLOYMENT_STATUS.md). Unverified or uncreated service URLs are not presented as working deployments.
 
@@ -154,7 +155,9 @@ Deployment URLs are recorded in [deployment status](docs/DEPLOYMENT_STATUS.md). 
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection string; Render's `postgresql://` form is accepted |
 | `ALLOWED_ORIGINS` | Comma-separated frontend origins; set the exact Vercel production URL |
-| `SYNC_INTERVAL_SECONDS` | `120` |
+| `SYNC_INTERVAL_SECONDS` | `120` locally; `300` for the free hosted schedule |
+| `REQUEST_DRIVEN_SYNC` | `false` locally; `true` on the free Render API |
+| `REQUEST_JOB_BUDGET_SECONDS` | `60`; soft budget checked between ingestion jobs |
 | `STALE_AFTER_SECONDS` | `300` |
 | `REFRESH_COOLDOWN_SECONDS` | `60` |
 | `JOB_LEASE_SECONDS` | `300` |

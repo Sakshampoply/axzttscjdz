@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     job_lease_seconds: int = 300
     bootstrap_history_days: int = 30
     bootstrap_demo: bool = False
+    request_driven_sync: bool = False
+    request_job_budget_seconds: int = 60
     http_timeout_seconds: float = 30
     frontend_dist: str = "frontend/dist"
     allowed_origins: str = "http://127.0.0.1:5173,http://localhost:5173"

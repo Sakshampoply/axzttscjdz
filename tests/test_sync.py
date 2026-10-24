@@ -135,3 +135,26 @@ def test_stream_response_can_be_bare_array_or_envelope(monkeypatch):
         )
         records, _ = ElexonClient().fetch("WINDFOR", {})
         assert len(records) == 1
+
+
+def test_bounded_runner_prioritises_refresh_and_retains_unfinished_jobs(session, monkeypatch):
+    from app.config import settings
+    from app.sync import run_bounded_jobs
+
+    monkeypatch.setenv("REQUEST_JOB_BUDGET_SECONDS", "1")
+    settings.cache_clear()
+    refresh = enqueue(session, "refresh")
+    session.commit()
+    called = []
+
+    def process(job_id, _owner):
+        called.append(job_id)
+
+    # A soft budget is checked between jobs. Pending imports remain in PostgreSQL.
+    ticks = iter([0, 0, 2])
+    monkeypatch.setattr("app.sync.time_module.monotonic", lambda: next(ticks))
+    monkeypatch.setattr("app.sync.process_job", process)
+    run_bounded_jobs()
+    assert called == [refresh.id]
+    session.expire_all()
+    assert session.scalar(select(func.count(SyncJob.id)).where(SyncJob.status == "pending")) > 0

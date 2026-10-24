@@ -47,7 +47,7 @@ export interface Accuracy {
 }
 export interface Job { id: number; kind: string; status: string; error: string | null; attempts: number; }
 export interface DataQuality {
-  checked_at: string; sync_interval_seconds: number; failed_jobs: number; jobs: Job[];
+  checked_at: string; sync_interval_seconds: number; sync_mode: 'worker' | 'scheduled_requests'; failed_jobs: number; jobs: Job[];
   datasets: { dataset: string; records: number; first_target: string | null; latest_target: string | null;
     latest_publication: string | null; last_checked: string | null; stale: boolean; error: string | null; retry_after: string | null }[];
 }

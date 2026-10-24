@@ -1,9 +1,10 @@
+# Free resources only. Render Free Postgres expires after 30 days.
 databases:
   - name: gridbricks-db
     databaseName: gridbricks
     user: gridbricks
     region: frankfurt
-    plan: 0.1c-256mb
+    plan: free
     postgresMajorVersion: "17"
     ipAllowList: []
 
@@ -14,9 +15,8 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     region: frankfurt
-    plan: 0.5c-512mb
+    plan: free
     healthCheckPath: /health
-    preDeployCommand: python -m app.cli migrate
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -25,22 +25,9 @@ services:
       - key: ALLOWED_ORIGINS
         sync: false
       - key: SYNC_INTERVAL_SECONDS
-        value: "120"
-  - type: worker
-    name: gridbricks-sync
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
-    dockerCommand: python -m app.cli worker
-    region: frankfurt
-    plan: 0.5c-512mb
-    envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: gridbricks-db
-          property: connectionString
-      - key: SYNC_INTERVAL_SECONDS
-        value: "120"
+        value: "300"
+      - key: REQUEST_DRIVEN_SYNC
+        value: "true"
       - key: BOOTSTRAP_HISTORY_DAYS
         value: "30"
       - key: BOOTSTRAP_DEMO
