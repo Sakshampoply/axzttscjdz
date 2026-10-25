@@ -71,6 +71,43 @@ def enqueue_history(session: Session, start: date, end: date) -> int:
     return count
 
 
+def ensure_dashboard_history(session: Session, decision_date: date, *, retry_failed=False) -> dict:
+    """Recover only days not already imported, coalescing across viewers and restarts."""
+    first, last = decision_date - timedelta(days=32), decision_date
+    queue_lock(session)
+    jobs = session.scalars(
+        select(SyncJob).where(
+            SyncJob.kind == "backfill",
+            SyncJob.payload["day"].as_string() >= first.isoformat(),
+            SyncJob.payload["day"].as_string() <= last.isoformat(),
+        )
+    ).all()
+    by_day = {}
+    for job in jobs:
+        by_day.setdefault(job.payload["day"], []).append(job)
+    pending = failed = 0
+    day = first
+    while day <= last:
+        previous = by_day.get(day.isoformat(), [])
+        if any(j.status == "completed" for j in previous):
+            day += timedelta(days=1)
+            continue
+        active = any(j.status in {"pending", "running"} for j in previous)
+        if active:
+            pending += 1
+        elif previous and not retry_failed:
+            failed += 1
+        else:
+            enqueue(session, "backfill", {"day": day.isoformat()}, f"backfill:{day.isoformat()}")
+            pending += 1
+        day += timedelta(days=1)
+    return {
+        "state": "loading" if pending else "unavailable" if failed else "ready",
+        "pending_days": pending,
+        "failed_days": failed,
+    }
+
+
 def ingest(dataset: str, parameters: dict, *, live: bool, client=None) -> dict:
     client = client or ElexonClient()
     model = WindForecast if dataset == "WINDFOR" else WindActual
@@ -327,12 +364,12 @@ def bootstrap_jobs(session: Session) -> None:
         settings().bootstrap_demo
         and session.scalar(
             select(SyncJob.id)
-            .where(SyncJob.kind == "backfill", SyncJob.payload["day"].as_string() == "2026-01-01")
+            .where(SyncJob.kind == "backfill", SyncJob.payload["day"].as_string() == "2025-12-01")
             .limit(1)
         )
         is None
     ):
-        enqueue_history(session, date(2025, 12, 30), date(2026, 2, 1))
+        enqueue_history(session, date(2025, 12, 1), date(2026, 2, 1))
     last = session.scalar(
         select(SyncJob.created_at)
         .where(

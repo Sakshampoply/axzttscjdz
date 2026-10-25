@@ -158,3 +158,21 @@ def test_bounded_runner_prioritises_refresh_and_retains_unfinished_jobs(session,
     assert called == [refresh.id]
     session.expire_all()
     assert session.scalar(select(func.count(SyncJob.id)).where(SyncJob.status == "pending")) > 0
+
+
+def test_extended_demo_bootstrap_also_runs_for_databases_with_old_january_seed(session, monkeypatch):
+    from app.config import settings
+    from app.sync import bootstrap_jobs
+
+    monkeypatch.setenv("BOOTSTRAP_DEMO", "true")
+    settings.cache_clear()
+    enqueue(session, "backfill", {"day": "2026-01-01"}, "backfill:2026-01-01")
+    session.commit()
+    bootstrap_jobs(session)
+    session.commit()
+    jobs = session.scalars(select(SyncJob).where(SyncJob.kind == "backfill")).all()
+    assert any(j.payload["day"] == "2025-12-01" for j in jobs)
+    count = len(jobs)
+    bootstrap_jobs(session)
+    session.commit()
+    assert session.scalar(select(func.count(SyncJob.id)).where(SyncJob.kind == "backfill")) == count

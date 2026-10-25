@@ -43,6 +43,12 @@ def cutoff(day: date, clock: time) -> datetime:
     return local.astimezone(UTC)
 
 
+def historical_cutoff(day: date, clock: time) -> datetime:
+    # A fixed daily policy uses the first repeated hour; gaps shift forward by the
+    # clock change. The user-entered decision itself is still strictly validated.
+    return datetime.combine(day, clock, LONDON).astimezone(UTC)
+
+
 def slots(day: date, minutes: int = 60) -> list[datetime]:
     start, end = day_bounds(day)
     result = []

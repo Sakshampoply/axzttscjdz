@@ -1,53 +1,44 @@
 # GridBricks
 
-Wind forecast intelligence for day-ahead electricity decisions in Great Britain.
+A simple wind forecast dashboard for day-ahead electricity decisions in Great Britain.
 
-**[Open the deployed application](https://gridbricks-wind.vercel.app)** · [Walkthrough video (MP4)](docs/media/walkthrough.mp4) · [Deployment status](docs/DEPLOYMENT_STATUS.md)
+Choose a **decision date and time**, press **View results**, and use the two tabs:
 
-GridBricks keeps checking Elexon, remembers each forecast version, and compares the forecast available at a decision cutoff with actual wind generation. It supports both current forecasts and historical replay. January 2026 is a demonstration preset, not a hardcoded operating period.
+- **Forecast** shows expected wind output for the following delivery day, using forecasts published by your decision time.
+- **Evaluation** compares earlier day-ahead forecasts with actual wind generation over the preceding 30 decision dates. It uses only outcomes available by your selected moment.
 
-## What users can do
+The initial selection is **27 January 2026 at 09:00 London time**, for delivery on 28 January. The same applied selection controls both tabs. Editing the inputs does not change results until View results is pressed. Each tab contains three summary cards, one chart, a compact source status, and a CSV download.
 
-- Review tomorrow's latest wind forecast, minimum output, publication time, and coverage.
-- Reconstruct a previous decision using a London date and cutoff time, defaulting to 09:00.
-- Compare eligible forecast publications and inspect downward revisions.
-- Explicitly reveal subsequent actuals without changing the decision-time forecast.
-- Evaluate MAE, bias, RMSE, WAPE, and coverage using daily bars, a heatmap, and an error distribution.
-- Separate outcomes known before a decision from retrospective evaluation.
-- Switch between source-publication replay and application-receipt replay.
-- Download an immutable, traceable CSV assessment and print the displayed report.
-- Inspect source freshness and request coalesced updates.
+The application uses Elexon **WINDFOR** and **FUELHH filtered to WIND** only. There is no customer demand input, client purchase-volume calculation, electricity pricing, order execution, or AI agent.
 
-The application uses **WINDFOR and FUELHH filtered to WIND only**. Customer demand, contracted supply, electricity prices, other fuels, purchasing recommendations, order execution, and AI agents are outside its scope. National wind is not the client's contracted generation.
+## Start locally
 
-## Start with Docker
-
-Requires Docker Engine and Docker Compose.
+Requires Docker Engine and Docker Compose:
 
 ```bash
 docker compose up --build -d
 ```
 
-Open **http://localhost:8080**. PostgreSQL persists in the `pgdata` volume. The migration service completes before web and worker start. The independent worker prioritises current data and fills the preceding month in the background.
+Open [localhost:8080](http://localhost:8080). PostgreSQL persists in the `pgdata` volume. The migration service completes before the web application and independent sync worker start.
 
-Load the January demonstration using the same ingestion pipeline:
+Import the January demonstration and its earlier evaluation history:
 
 ```bash
 docker compose exec web python -m app.cli demo
 ```
 
-The command queues 30 December–1 February imports to include required boundary records. Leave the worker running, then select **January 2026** in the interface. Check import progress in **Data status**.
+This queues **1 December 2025–1 February 2026**, covering January decisions and the preceding evaluation history. The dashboard also queues missing days for any selected date. Existing data appears immediately; a short message indicates when more records are being imported. Previously completed imports are reused, and concurrent users share jobs. Failed imports can be retried with View results.
 
 ```bash
 docker compose logs -f worker
 docker compose stop
 ```
 
-`stop` retains data. Removing the `pgdata` volume deletes the local database.
+Stopping retains data. Removing the `pgdata` volume deletes the local database.
 
-## Local development
+### Develop without containers for the application
 
-Requires Python 3.12+, uv, Node.js 22+, and PostgreSQL 17. Docker can provide PostgreSQL alone:
+Requires Python 3.12+, uv, Node.js 22+, and PostgreSQL 17. Start PostgreSQL with Docker, then run:
 
 ```bash
 cp .env.example .env
@@ -57,7 +48,7 @@ uv run python -m app.cli migrate
 uv run python -m app.cli worker
 ```
 
-In separate terminals:
+In two further terminals:
 
 ```bash
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
@@ -69,137 +60,121 @@ npm ci
 npm run dev
 ```
 
-Open **http://127.0.0.1:5173**. Vite proxies `/api` and `/health` to FastAPI. API documentation is at **http://127.0.0.1:8000/docs**.
+Open [127.0.0.1:5173](http://127.0.0.1:5173). Vite proxies API calls to FastAPI. Alternatively, `REQUEST_DRIVEN_SYNC=true` on the API runs bounded queue processing after dashboard requests, without a resident local worker.
 
-Additional data commands:
+## How the calculations work
 
-```bash
-uv run python -m app.cli sync
-uv run python -m app.cli demo
-uv run python -m app.cli backfill --start 2026-01-01 --end 2026-02-01 --enqueue
-```
+All timestamps are stored in UTC and interpreted or displayed in **Europe/London**, including clock changes. The entered time is a decision moment, not a delivery time. Future, nonexistent, or ambiguous decision times are rejected with a clear message.
 
-Omit `--enqueue` for a foreground import. The demo command is safe to repeat while its jobs are active; observation imports are idempotent.
+### Next-day forecast
 
-## Architecture
+For each target in the following delivery day, select the latest forecast whose `publishTime` is at or before the decision moment. Later publications and actual outcomes do not appear in this report. Average, minimum and maximum use available native forecast targets; missing values stay missing.
+
+### Earlier evaluation
+
+For a decision date D, the previous 30 decision dates are **D−30 through D−1**. Each uses the same selected London clock time on its own decision day and forecasts its following delivery day. Only delivery periods completed by the overall selected moment are included. Actual records, including revisions, must also have been published by that moment.
+
+For example, 27 January at 09:00 evaluates decisions from **28 December–26 January**, covering delivery from **29 December up to completed periods on 27 January**. Later January outcomes are excluded automatically. Unfinished periods do not lower scoring coverage.
+
+For earlier daily cutoffs across clock changes, a repeated clock time uses its first occurrence; a clock time skipped in spring moves forward by the clock-change gap. The actual user-entered decision time is always validated strictly.
+
+WINDFOR targets in the January data are hourly and FUELHH actuals are half-hourly. Compare exact `startTime` values: a forecast target is matched with the actual half-hour beginning at that timestamp. No additional forecasts are interpolated. Original source resolution and missing-data gaps are preserved.
+
+| Measure | Calculation | Meaning |
+| --- | --- | --- |
+| Error | Forecast − actual | Positive means actual wind was below forecast |
+| Average miss (MAE) | Mean absolute error | Typical size of the miss, in MW |
+| Forecast tendency (bias) | Mean signed error | Whether forecasts tended to be above or below actual wind |
+| Coverage | Matched targets ÷ expected completed targets | How much eligible evidence was available |
+| RMSE | Square root of mean squared error | Greater emphasis on large misses; retained in saved results |
+| WAPE | Sum of absolute errors ÷ sum of absolute actual generation × 100 | Aggregate relative error; unavailable for a zero denominator |
+
+Historical error is evidence, not a guaranteed future error range. Source publication times reconstruct published information; a later import does not prove when a client originally received it. The database retains original application receipt timestamps for auditing.
+
+## Architecture and source layout
 
 ```mermaid
 flowchart LR
-    G[GitHub schedule: five minutes] --> API
-    E[Elexon WINDFOR and FUELHH WIND] --> W[Bounded Python sync runner]
-    W --> DB[(PostgreSQL)]
-    U[React frontend on Vercel] --> API[FastAPI on Render]
-    API --> DB
-    API --> A[Shared analytics]
-    A --> API
-    API --> Q[Durable sync jobs in PostgreSQL]
-    Q --> W
+    UI[React: shared decision time and two tabs] --> API[FastAPI dashboard endpoint]
+    API --> DB[(PostgreSQL)]
+    API --> A[Cutoff-safe calculations]
+    API --> Q[Durable import and refresh jobs]
+    G[GitHub five-minute schedule] --> API
+    Q --> W[Bounded runner or local worker]
+    W --> E[Elexon WINDFOR and FUELHH WIND]
+    W --> DB
 ```
 
-The free hosted deployment uses a five-minute GitHub schedule and request-triggered bounded sync jobs inside the Render API. Local Docker uses an independent two-minute worker with the same queue and ingestion code. The browser refetches every 30 seconds. Free-host sleep, quotas, and scheduler delays prevent a guaranteed freshness SLA. A stale page read also queues a refresh; simultaneous refresh requests share one active job. Repeated public refreshes are coalesced during a 60-second cooldown.
-
-Jobs use `FOR UPDATE SKIP LOCKED`, expiring leases, and bounded retry times. Session advisory locks prevent overlapping fetches for the same dataset. Source `Retry-After` is honoured. Long outages create daily recovery jobs while current windows are prioritised. Recent history is reconciled daily to recover revisions and late records.
-
-Successful imports commit raw evidence, new observations, and the progress marker atomically. Identical payload content is retained once and linked by checksum on subsequent checks. A changed value with the same source identity is retained in raw evidence, while its original normalised record is flagged and excluded from calculations. Malformed batches do not partially advance progress.
-
-### Database tables
-
-| Table | Responsibility |
+| Location | Responsibility |
 | --- | --- |
-| `source_fetches` | Request windows, timings, checksums, raw payloads, outcomes, errors |
-| `wind_forecasts` | Unique target/publication versions, generation, first receipt, source references |
-| `wind_actuals` | Actual outturn versions and their publication/receipt evidence |
-| `sync_state` | Dataset progress, last successful checks, errors, retry deadlines |
-| `sync_jobs` | Refresh/backfill payloads, active deduplication keys, leases, attempts |
-| `analysis_runs` | Immutable parameters, calculation version, evidence, result snapshots |
+| `frontend/src/main.tsx` | Shared draft/applied selection, Forecast and Evaluation panels, CSV downloads |
+| `frontend/src/charts.tsx`, `styles.css`, `api.ts` | Two line charts, dark responsive styling, typed dashboard contract |
+| `app/dashboard.py` | One decision cutoff and fixed evaluation window; simplified reports |
+| `app/analytics.py` | Native alignment, selection, metrics, fingerprints and legacy calculations |
+| `app/main.py` | API validation, dashboard, refresh, saved analyses and exports |
+| `app/sync.py`, `elexon.py`, `cli.py` | Coalesced jobs, validated imports, retries, live updates and historical recovery |
+| `app/models.py`, `db.py`, `migrations/` | SQLAlchemy schema and Alembic migrations |
+| `tests/` | Calculation, API, ingestion, exports and real-PostgreSQL concurrency tests |
+| `Dockerfile`, `compose.yaml`, `render.yaml`, `frontend/vercel.json` | Containers and hosting configuration |
+| `docs/` | Deployment instructions, implementation status and interface screenshots |
 
-### Directory guide
+The six existing database tables are retained: `source_fetches`, `wind_forecasts`, `wind_actuals`, `sync_state`, `sync_jobs`, and `analysis_runs`. Forecast target/publication identities remain immutable. Imports and progress commit atomically. Conflicting source values are retained and flagged. Dataset advisory locks, queue coalescing, retry windows, and expiring job leases protect synchronisation.
 
-| Location | Contents |
+### Dashboard API
+
+```text
+GET /api/dashboard?decision_date=2026-01-27&decision_time=09:00
+```
+
+Both fields are required and represent London time. The response contains `selection`, `forecast`, `evaluation`, `source` freshness, and `history` import status. Report fingerprints exclude volatile freshness/import status. Both reports use the same cutoff, with no client-controlled analysis modes.
+
+New CSV assessments use `POST /api/analysis-runs` with `dashboard: true`, the report kind (`forecast` or `accuracy`), the two selection fields in `parameters`, and its `expected_fingerprint`. The server recalculates that report before saving; a changed fingerprint returns 409 so a download cannot silently differ from visible results. `GET /api/export?run_id=...` downloads the frozen rows. Existing saved analyses and legacy read APIs remain compatible.
+
+Other operational endpoints are `/health`, `/api/data-quality`, `/api/refresh`, and `/api/jobs/{id}`. A refresh may optionally include the same date/time query parameters to retry failed historical imports.
+
+## Hosting and configuration
+
+The existing hosting setup uses a **Vercel frontend**, **free Render API and PostgreSQL**, and **GitHub scheduled refresh requests**. See [deployment instructions](docs/DEPLOYMENT.md) and [implementation status](docs/DEPLOYMENT_STATUS.md) for URLs and verification state.
+
+The free hosted schedule targets five-minute checks. Local Docker uses a two-minute worker. Screens recheck stored results every 30 seconds. Free-host sleep, shared quotas, upstream publication delays and GitHub schedule delays prevent a freshness SLA. Free Render PostgreSQL expires after 30 days; the existing instance expires **23 November 2026**. Another PostgreSQL database can be substituted through `DATABASE_URL`.
+
+| Variable | Meaning |
 | --- | --- |
-| `app/analytics.py` | Cutoff selection, native timestamp alignment, metrics and findings |
-| `app/sync.py`, `app/elexon.py` | Durable jobs, HTTP client, incremental imports and worker |
-| `app/models.py`, `app/db.py` | SQLAlchemy models and database connections |
-| `app/main.py` | Validated API, refresh coalescing, data health, frozen exports |
-| `app/cli.py` | Migrations, worker, historical and current import commands |
-| `frontend/src/` | React application, ECharts components, API types and styling |
-| `migrations/` | Versioned Alembic database migrations |
-| `tests/` | Calculation, API, ingestion and real-PostgreSQL concurrency tests |
-| `docs/` | Methodology, deployment instructions and demonstration materials |
-| `compose.yaml`, `Dockerfile` | Reproducible local and hosted containers |
-| `render.yaml`, `frontend/vercel.json` | Render backend resources and Vercel frontend configuration |
-
-## Analytical conventions
-
-- **Decision-time forecast:** latest `publishTime` at or before the cutoff, selected per `startTime`.
-- **Source replay:** publication-time reconstruction. It does not assert original network delivery latency.
-- **Receipt replay:** additionally requires `first_seen_at` at or before the relevant information cutoff. A later historical import is not treated as originally received.
-- **Actual revisions:** use the latest eligible actual publication by the evaluation cutoff.
-- **Native alignment:** January WINDFOR is hourly; FUELHH is half-hourly. Compare the forecast with the actual half-hour beginning at the exact same `startTime`. Do not interpolate forecasts or claim coverage for every half-hour.
-- **Error:** forecast minus actual. Positive means actual wind was below forecast.
-- **MAE:** mean absolute error. **Bias:** mean signed error. **RMSE:** square root of mean squared error. **WAPE:** sum of absolute errors divided by sum of absolute actual generation, times 100.
-- **Coverage:** matched targets divided by expected native targets. Missing values remain missing. Zero WAPE denominator yields unavailable.
-- **Known history:** both forecast eligibility and actual publication/receipt eligibility respect the historical information cutoff.
-- **January boundary:** 1–31 January decisions cover delivery on 2 January–1 February.
-- **Clock changes:** UTC storage and London-aware delivery boundaries preserve 23/25-hour days and 46/50-half-hour days.
-
-Historical errors are measured evidence, not guaranteed future uncertainty bounds. Operational outturn may be revised and is not a client-specific settled position. Forecast revisions are not independent probabilistic ensemble members. Summaries are deterministic templates; they do not infer weather causes or prices.
-
-## Deployment
-
-Deployed architecture: **Vercel frontend + free Render API and PostgreSQL + GitHub scheduled refreshes**. No paid worker is provisioned. Free Render PostgreSQL expires after 30 days; this build’s instance expires 23 November 2026. See [deployment guide](docs/DEPLOYMENT.md) for resource setup, environment variables, migration ordering, CORS, seeding, and public checks.
-
-Deployment URLs are recorded in [deployment status](docs/DEPLOYMENT_STATUS.md). Unverified or uncreated service URLs are not presented as working deployments.
-
-### Environment variables
-
-| Variable | Default / meaning |
-| --- | --- |
-| `DATABASE_URL` | PostgreSQL connection string; Render's `postgresql://` form is accepted |
-| `ALLOWED_ORIGINS` | Comma-separated frontend origins; set the exact Vercel production URL |
-| `SYNC_INTERVAL_SECONDS` | `120` locally; `300` for the free hosted schedule |
-| `REQUEST_DRIVEN_SYNC` | `false` locally; `true` on the free Render API |
-| `REQUEST_JOB_BUDGET_SECONDS` | `60`; soft budget checked between ingestion jobs |
+| `DATABASE_URL` | PostgreSQL connection string; never commit credentials |
+| `ALLOWED_ORIGINS` | Exact frontend origins allowed by FastAPI |
+| `SYNC_INTERVAL_SECONDS` | `120` for the local worker; `300` for hosted schedule metadata |
+| `REQUEST_DRIVEN_SYNC` | `true` for bounded processing inside the free hosted API |
+| `REQUEST_JOB_BUDGET_SECONDS` | `60`, checked between jobs |
 | `STALE_AFTER_SECONDS` | `300` |
 | `REFRESH_COOLDOWN_SECONDS` | `60` |
 | `JOB_LEASE_SECONDS` | `300` |
 | `BOOTSTRAP_HISTORY_DAYS` | `30` |
-| `BOOTSTRAP_DEMO` | `false`; Render blueprint sets true for one-time January queueing |
-| `HTTP_TIMEOUT_SECONDS` | `30` |
-| `VITE_API_BASE_URL` | Frontend build-time Render API origin; empty for same-origin Docker/local proxy |
+| `BOOTSTRAP_DEMO` | Queue December/January records once when enabled |
+| `VITE_API_BASE_URL` | Frontend build-time API origin; empty for the local proxy or same-origin Docker |
 
-## Verification
+## Verify
 
 ```bash
+uv run ruff check app tests
 uv run pytest -q
-cd frontend
-npm run build
+npm run build --prefix frontend
 ```
 
-PostgreSQL-specific tests run against an explicitly named disposable `_test` database:
+Run PostgreSQL concurrency tests against an explicitly named disposable test database:
 
 ```bash
 docker compose exec -T db createdb -U gridbricks gridbricks_test
 TEST_DATABASE_URL=postgresql+psycopg://gridbricks:gridbricks@localhost:55432/gridbricks_test uv run pytest -q
 ```
 
-Tests delete and recreate application tables **only in the isolated test database**. Unit tests use temporary SQLite databases; the PostgreSQL suite verifies advisory locks, concurrent job coalescing, and worker claims. CI runs both suites, builds the frontend, and checks container configuration.
+Tests recreate application tables only inside the isolated test database. Browser checks cover two-tab navigation, applied selection, date changes, dark styling, mobile layout, loading/error states, chart tooltips, and CSV downloads.
 
-Tests cover cutoff leakage, hidden actuals, original receipt semantics, February boundaries, clock changes, missing/zero values, real arithmetic fixtures, source conflicts, atomic failure, retry deadlines, duplicate imports, leases, and immutable CSV evidence. Browser verification should include January replay, reveal actuals, alternate publications, accuracy modes, export, refresh, mobile layout, and data-health inspection.
+## AI assistance disclosure and data sources
 
-## Demonstration and submission
-
-Use [the demonstration script](docs/DEMO_SCRIPT.md). The required video has two parts: a client-facing overview and a technical review, no more than five minutes each and ten minutes total. It must be uploaded as an unlisted YouTube video before submission. Public repository, application, and video links must work in incognito mode.
-
-## AI assistance disclosure
-
-This application, tests, documentation, and demonstration preparation were developed with OpenAI Codex assistance. All numerical analysis is performed by deterministic Python code; there is no LLM or autonomous trading agent in the application. Source behaviour was checked against Elexon records and documentation.
-
-## Sources
+The application, tests and documentation were developed with OpenAI Codex assistance. All calculations and summaries use deterministic Python code; the application does not call an LLM.
 
 - [WINDFOR stream documentation](https://bmrs.elexon.co.uk/api-documentation/endpoint/datasets/WINDFOR/stream)
 - [FUELHH stream documentation](https://bmrs.elexon.co.uk/api-documentation/endpoint/datasets/FUELHH/stream)
-- [Elexon wind generation definitions](https://bmrs.elexon.co.uk/wind-generation)
-- [Elexon platform guidance](https://github.com/elexon-data/insights-docs/blob/main/docs/insights_data_platform.md)
+- [Elexon wind definitions](https://bmrs.elexon.co.uk/wind-generation)
 
-Elexon is the source of the generation data. The application is independently developed and does not imply Elexon endorsement.
+GridBricks is independently developed and does not imply Elexon endorsement.

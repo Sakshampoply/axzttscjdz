@@ -58,3 +58,28 @@ def test_dataset_lock_prevents_overlapping_fetches():
         finally:
             release.set()
             future.result()
+
+
+@pytest.mark.postgres
+def test_concurrent_dashboard_history_requests_share_daily_jobs():
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import date
+
+    from sqlalchemy import func, select
+    from sqlalchemy.orm import Session
+
+    from app.db import engine
+    from app.models import SyncJob
+    from app.sync import ensure_dashboard_history
+
+    def request(_):
+        with Session(engine()) as session:
+            result = ensure_dashboard_history(session, date(2026, 1, 27))
+            session.commit()
+            return result
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(request, range(8)))
+    assert all(r["pending_days"] == 33 for r in results)
+    with Session(engine()) as session:
+        assert session.scalar(select(func.count(SyncJob.id))) == 33

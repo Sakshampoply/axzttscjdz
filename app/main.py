@@ -11,16 +11,17 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.analytics import METHOD_VERSION, accuracy_analysis, forecast_analysis
 from app.config import settings
+from app.dashboard import dashboard_reports, decision_cutoff, source_freshness
 from app.db import engine, get_session
 from app.models import AnalysisRun, SyncJob, SyncState, WindActual, WindForecast
-from app.sync import enqueue, queue_lock, run_bounded_jobs
+from app.sync import enqueue, ensure_dashboard_history, queue_lock, run_bounded_jobs
 from app.timeutils import aware, iso, utcnow
 
 log = logging.getLogger(__name__)
@@ -121,6 +122,21 @@ def forecast(
         as_of=as_of,
         evaluation_at=evaluation_at,
     )
+
+
+@app.get("/api/dashboard")
+def dashboard(
+    background_tasks: BackgroundTasks,
+    decision_date: date,
+    decision_time: time,
+    session: Session = Depends(get_session),
+):
+    result = dashboard_reports(session, decision_date, decision_time)
+    result["source"] = source_freshness(session)
+    result["history"] = ensure_dashboard_history(session, decision_date)
+    session.commit()
+    refresh_if_stale(background_tasks)
+    return result
 
 
 @app.get("/api/forecast-history")
@@ -233,8 +249,19 @@ def job_dict(job):
 
 
 @app.post("/api/refresh", status_code=202)
-def refresh(background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
+def refresh(
+    background_tasks: BackgroundTasks,
+    decision_date: date | None = None,
+    decision_time: time | None = None,
+    session: Session = Depends(get_session),
+):
+    if (decision_date is None) != (decision_time is None):
+        raise HTTPException(422, "Provide both a decision date and time")
+    if decision_date is not None:
+        decision_cutoff(decision_date, decision_time)
     job = request_refresh(session)
+    if decision_date is not None and job.status in {"pending", "running"}:
+        ensure_dashboard_history(session, decision_date, retry_failed=True)
     result = job_dict(job)
     session.commit()
     schedule_runner(background_tasks)
@@ -252,7 +279,8 @@ def job_status(job_id: int, session: Session = Depends(get_session)):
 class SnapshotRequest(BaseModel):
     kind: Literal["forecast", "accuracy"]
     parameters: dict
-    expected_fingerprint: str
+    expected_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    dashboard: bool = False
 
 
 @app.post("/api/analysis-runs", status_code=201)
@@ -260,6 +288,17 @@ def snapshot(body: SnapshotRequest, session: Session = Depends(get_session)):
     from app.timeutils import parse_time
 
     p = dict(body.parameters)
+    if body.dashboard:
+        if set(p) != {"decision_date", "decision_time"}:
+            raise HTTPException(422, "A dashboard export requires its decision date and time")
+        try:
+            selected_date = date.fromisoformat(p["decision_date"])
+            selected_time = time.fromisoformat(p["decision_time"])
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(422, "Provide a valid decision date and time") from exc
+        reports = dashboard_reports(session, selected_date, selected_time)
+        result = reports["forecast" if body.kind == "forecast" else "evaluation"]
+        return save_snapshot(session, body, result)
     # Explicit allowlists prevent a client from submitting arbitrary server-side calls.
     allowed = (
         {
@@ -298,6 +337,10 @@ def snapshot(body: SnapshotRequest, session: Session = Depends(get_session)):
         )
     except TypeError as exc:
         raise HTTPException(422, "Missing or invalid snapshot parameters") from exc
+    return save_snapshot(session, body, result)
+
+
+def save_snapshot(session: Session, body: SnapshotRequest, result: dict):
     if not hmac.compare_digest(result["fingerprint"], body.expected_fingerprint):
         raise HTTPException(409, "Source evidence changed. Refresh the analysis before exporting.")
     existing = session.scalar(select(AnalysisRun).where(AnalysisRun.fingerprint == result["fingerprint"]))
@@ -307,7 +350,7 @@ def snapshot(body: SnapshotRequest, session: Session = Depends(get_session)):
         id=str(uuid.uuid4()),
         fingerprint=result["fingerprint"],
         parameters=body.parameters,
-        method_version=METHOD_VERSION,
+        method_version=result["method_version"],
         result=result,
     )
     session.add(record)

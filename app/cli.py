@@ -54,7 +54,7 @@ def main():
         sync_latest()
     elif args.command == "demo":
         with Session(engine()) as session:
-            count = enqueue_history(session, date(2025, 12, 30), date(2026, 2, 1))
+            count = enqueue_history(session, date(2025, 12, 1), date(2026, 2, 1))
             session.commit()
         print(
             f"Queued {count} daily imports for January decisions and boundary records. Run the worker to process them."

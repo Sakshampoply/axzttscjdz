@@ -8,7 +8,7 @@
 
 `render.yaml` contains only free plans. `REQUEST_DRIVEN_SYNC=true` runs a bounded job processor after a stale dashboard read or manual/scheduled refresh request. Responses use stored results immediately. The runner prioritises current data, then imports history for up to 60 seconds between jobs. It uses a process lock and PostgreSQL advisory lock, plus the same durable leases and dataset locks as the standalone worker. A stopped runner leaves jobs recoverable. No timer depends on an open browser.
 
-**This free setup has no freshness or availability SLA.** GitHub schedules can be delayed, skipped, or disabled after 60 days without repository activity. Render can sleep after 15 idle minutes and cold-start on the next request. Its 750 monthly free instance hours are shared across the workspace, including other apps. Five-minute requests can keep this service awake and consume that allowance. Quota exhaustion can suspend free services. Source delays and failures are visible independently of scheduler delays. The manual update control remains available when the API is running.
+**This free setup has no freshness or availability SLA.** GitHub schedules can be delayed, skipped, or disabled after 60 days without repository activity. Render can sleep after 15 idle minutes and cold-start on the next request. Its 750 monthly free instance hours are shared across the workspace, including other apps. Five-minute requests can keep this service awake and consume that allowance. Quota exhaustion can suspend free services. Source delays and failures are visible independently of scheduler delays. The View results action can request stored results while the API is running.
 
 **Free Render PostgreSQL expires 30 days after creation**, has a 1 GB limit, and no managed backups. The instance created for this build expires **23 November 2026**. It must be replaced or migrated before expiry to preserve application availability. No paid upgrade is enabled by this project. Keep independent logical backups if receipt history and saved assessments must survive expiry; historical published records can be reimported, but original receipt times cannot be recreated. Another PostgreSQL provider can be substituted using `DATABASE_URL` without changing analytics.
 
@@ -22,7 +22,7 @@ References: [Render free limits](https://render.com/docs/free), [GitHub schedule
 4. Deploy. `python -m app.serve` runs Alembic migrations under an advisory lock before starting FastAPI; a paid pre-deploy feature is unnecessary.
 5. Request `/api/refresh` once. Current data is checked first; January and preceding-month history are queued automatically. Additional requests continue pending imports. `/api/data-quality` reports jobs and dataset status.
 
-The checked-in Docker Compose setup still has a separate local worker checking every two minutes. It is an alternative execution mode for the same queue and code. Do not run a paid Render worker for the free deployment.
+The checked-in Docker Compose setup has a separate local worker checking every two minutes. It is an alternative execution mode for the same queue and code. Do not run a paid Render worker for the free deployment.
 
 ## Vercel setup
 
@@ -49,9 +49,8 @@ The five-minute schedule is offset from the top of the hour. Concurrency prevent
 - `/health` returns 200; `/api/data-quality` reports `scheduled_requests` mode.
 - A manual refresh is accepted and its job completes; repeated requests share its identity.
 - A GitHub workflow run accepts a refresh while the dashboard is closed.
-- January replay selects 27 January at 09:00 for 28 January delivery.
-- Actual reveal preserves the selected forecast and eligible publication cutoff.
-- January 1–31 accuracy covers January 2–February 1 (744 hourly targets for the demonstrated policy).
+- The default decision selects 27 January at 09:00 for 28 January delivery.
+- Evaluation automatically uses the prior 30 decision dates and only completed outcomes known by that moment.
+- Both tabs use one applied date/time and expose no analysis-mode controls.
 - CSV matches its frozen evidence, including source references.
 - Free plan and expiry limitations remain documented; no paid resources are provisioned.
-- The required unlisted YouTube video is playable without signing in before assignment submission.

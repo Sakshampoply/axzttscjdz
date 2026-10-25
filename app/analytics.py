@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import WindActual, WindForecast
-from app.timeutils import LONDON, aware, cutoff, day_bounds, iso, slots, utcnow
+from app.timeutils import LONDON, aware, cutoff, day_bounds, historical_cutoff, iso, slots, utcnow
 
 METHOD_VERSION = "native-target-v1"
 ALIGNMENT = (
@@ -64,8 +64,8 @@ def series(session: Session, model, start: datetime, end: datetime):
     ).all()
 
 
-def stamp_result(result: dict) -> dict:
-    result["method_version"] = METHOD_VERSION
+def stamp_result(result: dict, method_version: str = METHOD_VERSION) -> dict:
+    result["method_version"] = method_version
     result["alignment"] = ALIGNMENT
     # Exclude freshness clocks from this evidence fingerprint; selected records and cutoffs remain included.
     result["fingerprint"] = hashlib.sha256(
@@ -269,6 +269,7 @@ def accuracy_analysis(
     known_at: datetime | None = None,
     availability="published",
     evaluation_at: datetime | None = None,
+    completed_only: bool = False,
 ) -> dict:
     if end < start or (end - start).days > 61:
         raise ValueError("Choose an ordered range of at most 62 decision days")
@@ -284,13 +285,33 @@ def accuracy_analysis(
     _, last = day_bounds(end + timedelta(days=1))
     forecasts = group_records(series(session, WindForecast, first, last))
     actuals = group_records(series(session, WindActual, first, last))
-    cadence = infer_cadence(forecasts)
+    cadence = infer_cadence(
+        {
+            target: versions
+            for target, versions in forecasts.items()
+            if any(
+                eligible(
+                    r,
+                    min(
+                        evaluation,
+                        historical_cutoff(
+                            target.astimezone(LONDON).date() - timedelta(days=1), decision_time
+                        ),
+                    ),
+                    availability,
+                )
+                for r in versions
+            )
+        }
+    )
     rows, daily = [], []
     current = start
     while current <= end:
-        selected_at = cutoff(current, decision_time)
+        selected_at = historical_cutoff(current, decision_time)
         delivery = current + timedelta(days=1)
         targets = slots(delivery, cadence)
+        if completed_only:
+            targets = [target for target in targets if target + timedelta(minutes=30) <= evaluation]
         day_rows = []
         for target in targets:
             f = (
