@@ -5,14 +5,15 @@ import {
   type EChartsCoreOption,
   type EChartsType,
 } from "echarts/core";
-import { LineChart } from "echarts/charts";
+import { LineChart, type LineSeriesOption } from "echarts/charts";
 import {
   GridComponent,
   TooltipComponent,
   AriaComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
-import type { EvaluationPoint, ForecastPoint } from "./api";
+import type { EvaluationPoint, ForecastComparisonPoint } from "./api";
+import { chartPalette, type Theme } from "./theme";
 
 use([
   LineChart,
@@ -21,8 +22,6 @@ use([
   AriaComponent,
   CanvasRenderer,
 ]);
-const cyan = "#22d3ee";
-const violet = "#a78bfa";
 const number = (n: number) =>
   n.toLocaleString("en-GB", { maximumFractionDigits: 0 });
 const londonTime = new Intl.DateTimeFormat("en-GB", {
@@ -52,22 +51,28 @@ interface TooltipItem {
 export function WindChart({
   points,
   evaluation = false,
+  theme,
 }: {
-  points: ForecastPoint[] | EvaluationPoint[];
+  points: ForecastComparisonPoint[] | EvaluationPoint[];
   evaluation?: boolean;
+  theme: Theme;
 }) {
   const element = useRef<HTMLDivElement>(null);
   const chart = useRef<EChartsType | null>(null);
   const option = useMemo<EChartsCoreOption>(() => {
-    const series = [
+    const palette = chartPalette[theme];
+    const byTimestamp = new Map(
+      points.map((p) => [Date.parse(p.start_time), p]),
+    );
+    const series: LineSeriesOption[] = [
       {
         name: "Forecast",
         type: "line",
         showSymbol: false,
         connectNulls: false,
         data: points.map((p) => [Date.parse(p.start_time), p.forecast_mw]),
-        lineStyle: { color: cyan, width: evaluation ? 2 : 3 },
-        itemStyle: { color: cyan },
+        lineStyle: { color: palette.forecast, width: evaluation ? 2 : 3 },
+        itemStyle: { color: palette.forecast },
         areaStyle: evaluation
           ? undefined
           : {
@@ -78,7 +83,7 @@ export function WindChart({
                 x2: 0,
                 y2: 1,
                 colorStops: [
-                  { offset: 0, color: "#22d3ee25" },
+                  { offset: 0, color: palette.area },
                   { offset: 1, color: "#22d3ee00" },
                 ],
               },
@@ -95,9 +100,22 @@ export function WindChart({
           Date.parse(p.start_time),
           p.actual_mw,
         ]),
-        lineStyle: { color: violet, width: 2 },
-        itemStyle: { color: violet },
+        lineStyle: { color: palette.actual, width: 2 },
+        itemStyle: { color: palette.actual },
         areaStyle: undefined,
+      });
+    else
+      series.push({
+        name: "Previous forecast",
+        type: "line",
+        showSymbol: false,
+        connectNulls: false,
+        data: (points as ForecastComparisonPoint[]).map((p) => [
+          Date.parse(p.start_time),
+          p.previous_mw,
+        ]),
+        lineStyle: { color: palette.comparison, width: 2, type: "dashed" },
+        itemStyle: { color: palette.comparison },
       });
     return {
       useUTC: true,
@@ -108,15 +126,15 @@ export function WindChart({
         enabled: true,
         description: evaluation
           ? "Earlier day-ahead wind forecasts in cyan and actual generation in violet. All outcomes were available at the selected decision time. Download CSV for the values."
-          : "Wind generation forecast in cyan for the next delivery day, using publications available at the selected decision time. Download CSV for the values.",
+          : "Selected wind forecast in cyan and the previous available forecast in dashed violet. Both were published by the selected decision time. Tooltips and CSV include changes in MW and percent.",
       },
       grid: { top: 28, bottom: 45, left: 65, right: 24 },
       tooltip: {
         trigger: "axis",
         confine: true,
-        backgroundColor: "#1b283b",
-        borderColor: "#35465d",
-        textStyle: { color: "#f1f5f9", fontSize: 13 },
+        backgroundColor: palette.tooltip,
+        borderColor: palette.tooltipBorder,
+        textStyle: { color: palette.tooltipText, fontSize: 13 },
         padding: 12,
         formatter: (items: TooltipItem[]) => {
           if (!items.length) return "";
@@ -135,6 +153,27 @@ export function WindChart({
                 `Difference: <b>${error > 0 ? "+" : ""}${number(error)} MW</b>`,
               );
             }
+          } else {
+            const point = byTimestamp.get(items[0].value[0]) as
+              | ForecastComparisonPoint
+              | undefined;
+            if (point?.revision_mw != null) {
+              const percent =
+                point.revision_percent == null
+                  ? "percentage unavailable"
+                  : `${point.revision_percent > 0 ? "+" : ""}${point.revision_percent.toLocaleString("en-GB", { maximumFractionDigits: 1 })}%`;
+              lines.push(
+                `Change: <b>${point.revision_mw > 0 ? "+" : ""}${number(point.revision_mw)} MW (${percent})</b>`,
+              );
+            }
+            if (point?.forecast_publish_time)
+              lines.push(
+                `Published: ${londonStamp.format(new Date(point.forecast_publish_time))}`,
+              );
+            if (point?.previous_publish_time)
+              lines.push(
+                `Previous: ${londonStamp.format(new Date(point.previous_publish_time))}`,
+              );
           }
           return `<div style="margin-bottom:8px">${londonStamp.format(items[0].value[0])}</div>${lines.join("<br/>")}`;
         },
@@ -147,11 +186,11 @@ export function WindChart({
           : undefined,
         minInterval: evaluation ? 86400000 : 3600000,
         splitNumber: evaluation ? 6 : 8,
-        axisLine: { lineStyle: { color: "#2a374b" } },
+        axisLine: { lineStyle: { color: palette.axis } },
         axisTick: { show: false },
         splitLine: { show: false },
         axisLabel: {
-          color: "#9baec8",
+          color: palette.text,
           fontSize: 12,
           hideOverlap: true,
           formatter: (v: number) =>
@@ -161,13 +200,13 @@ export function WindChart({
       yAxis: {
         type: "value",
         name: "MW",
-        nameTextStyle: { color: "#9baec8", padding: [0, 0, 8, 0] },
-        axisLabel: { color: "#9baec8", fontSize: 12, formatter: number },
-        splitLine: { lineStyle: { color: "#263246", type: "dashed" } },
+        nameTextStyle: { color: palette.text, padding: [0, 0, 8, 0] },
+        axisLabel: { color: palette.text, fontSize: 12, formatter: number },
+        splitLine: { lineStyle: { color: palette.grid, type: "dashed" } },
       },
       series,
     };
-  }, [points, evaluation]);
+  }, [points, evaluation, theme]);
   useEffect(() => {
     if (!element.current) return;
     const instance = init(element.current, undefined, { renderer: "canvas" });
@@ -191,7 +230,7 @@ export function WindChart({
       aria-label={
         evaluation
           ? "Earlier day-ahead wind forecasts and actual wind generation, using only outcomes available at the selected decision time. Missing values appear as gaps."
-          : "Wind generation forecast for the next delivery day. All forecasts were published by the selected decision time."
+          : "Latest and previous wind forecasts for the next delivery day. Both were published by the selected decision time. Changes are available in MW and percent in the tooltip and CSV."
       }
     />
   );

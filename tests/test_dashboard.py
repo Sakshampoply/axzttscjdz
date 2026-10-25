@@ -138,13 +138,18 @@ def test_dashboard_export_is_cutoff_safe_frozen_and_matches_visible_values(seed,
         rows = list(csv.DictReader(io.StringIO(client.get(f"/api/export?run_id={run_id}").text)))
         assert len(rows) == len(report["points"])
         assert rows[0]["information_cutoff"] == report["as_of"]
-        assert rows[0]["method_version"] == "decision-dashboard-v2"
+        assert rows[0]["method_version"] == "decision-dashboard-v3"
         if kind == "forecast":
             assert "actual_mw" not in rows[0]
             assert float(rows[0]["forecast_mw"]) == 110
+            assert "revision_percent" in rows[0]
         else:
             matched = next(r for r in rows if r["actual_mw"])
             assert float(matched["error_mw"]) == 20
+            assert float(matched["window_wape_percent"]) == 25
+            assert float(matched["window_bias_percent"]) == 25
+            assert float(matched["window_below_forecast_percent"]) == 100
+            assert float(matched["window_p90_absolute_error_mw"]) == 20
             assert all(parse_time(r["start_time"]) < parse_time(report["as_of"]) for r in rows)
         # Even newly received eligible source records cannot rewrite a saved assessment.
         seed("forecast", "2026-01-28T01:00Z", "2026-01-27T08:30Z", 90)
@@ -190,3 +195,71 @@ def test_dashboard_snapshot_rejects_malformed_selection_and_fingerprint():
         body["expected_fingerprint"] = "not a fingerprint"
         assert client.post("/api/analysis-runs", json=body).status_code == 422
         assert client.get("/api/dashboard?decision_date=0001-01-01&decision_time=09:00").status_code == 422
+
+
+def test_forecast_comparison_uses_only_prior_eligible_versions_and_exports_changes(session, seed):
+    earlier = seed("forecast", "2026-01-28T00:00Z", "2026-01-27T06:00Z", 200)
+    latest = seed("forecast", "2026-01-28T00:00Z", "2026-01-27T09:00Z", 150)
+    seed("forecast", "2026-01-28T00:00Z", "2026-01-27T09:01Z", 1)
+    seed("forecast", "2026-01-28T00:00Z", "2026-01-27T08:30Z", 1, conflicted=True)
+    report = dashboard_reports(session, date(2026, 1, 27), time(9))["forecast"]
+    point = report["points"][0]
+    assert point["forecast_id"] == latest.id and point["previous_id"] == earlier.id
+    assert point["previous_mw"] == 200
+    assert point["revision_mw"] == -50 and point["revision_percent"] == -25
+    assert report["summary"]["largest_revision"] == point
+    assert report["summary"]["comparison_count"] == 1
+    with TestClient(app) as client:
+        saved = client.post(
+            "/api/analysis-runs",
+            json={
+                "dashboard": True,
+                "kind": "forecast",
+                "parameters": {"decision_date": "2026-01-27", "decision_time": "09:00"},
+                "expected_fingerprint": report["fingerprint"],
+            },
+        )
+        assert saved.status_code == 201
+        rows = list(csv.DictReader(io.StringIO(client.get(f"/api/export?run_id={saved.json()['id']}").text)))
+        assert float(rows[0]["revision_mw"]) == -50
+        assert float(rows[0]["revision_percent"]) == -25
+        assert rows[0]["previous_publish_time"] == point["previous_publish_time"]
+
+
+def test_missing_or_zero_previous_forecast_keeps_percent_unavailable(session, seed):
+    seed("forecast", "2026-01-28T00:00Z", "2026-01-27T06:00Z", 0)
+    seed("forecast", "2026-01-28T00:00Z", "2026-01-27T08:00Z", 20)
+    seed("forecast", "2026-01-28T01:00Z", "2026-01-27T08:00Z", 30)
+    report = dashboard_reports(session, date(2026, 1, 27), time(9))["forecast"]
+    assert report["points"][0]["revision_mw"] == 20
+    assert report["points"][0]["revision_percent"] is None
+    assert report["points"][1]["revision_mw"] is None
+    assert report["summary"]["comparison_count"] == 1
+
+
+def test_percentage_and_tail_context_use_matched_cutoff_safe_evidence(session, seed):
+    for hour, forecast, actual in [(0, 120, 100), (1, 60, 100), (2, 200, 100)]:
+        target = f"2026-01-27T{hour:02}:00Z"
+        seed("forecast", target, "2026-01-26T08:00Z", forecast)
+        seed("actual", target, f"2026-01-27T{hour:02}:30Z", actual)
+    seed("forecast", "2026-01-27T03:00Z", "2026-01-26T08:00Z", 1000)
+    seed("actual", "2026-01-27T03:00Z", "2026-01-27T10:00Z", 1)
+    metrics = dashboard_reports(session, date(2026, 1, 27), time(9))["evaluation"]["metrics"]
+    assert metrics["matched"] == 3
+    assert metrics["mae"] == pytest.approx(160 / 3)
+    assert metrics["wape"] == pytest.approx(160 / 300 * 100)
+    assert metrics["bias_percent"] == pytest.approx(80 / 300 * 100)
+    assert metrics["below_forecast_percent"] == pytest.approx(2 / 3 * 100)
+    assert metrics["p90_absolute_error_mw"] == pytest.approx(88)
+
+
+def test_zero_actuals_and_no_matches_do_not_produce_infinite_percentages(session, seed):
+    empty = dashboard_reports(session, date(2026, 1, 27), time(9))["evaluation"]["metrics"]
+    for key in ["wape", "bias_percent", "below_forecast_percent", "p90_absolute_error_mw"]:
+        assert empty[key] is None
+    seed("forecast", "2026-01-27T00:00Z", "2026-01-26T08:00Z", 20)
+    seed("actual", "2026-01-27T00:00Z", "2026-01-27T00:30Z", 0)
+    metrics = dashboard_reports(session, date(2026, 1, 27), time(9))["evaluation"]["metrics"]
+    assert metrics["wape"] is None and metrics["bias_percent"] is None
+    assert metrics["below_forecast_percent"] == 100
+    assert metrics["p90_absolute_error_mw"] == 20

@@ -1,4 +1,5 @@
 import {
+  useEffect,
   useRef,
   useState,
   type FormEvent,
@@ -19,6 +20,8 @@ import {
   Clock3,
   Download,
   LoaderCircle,
+  Moon,
+  Sun,
   TriangleAlert,
   Wind,
   X,
@@ -34,6 +37,7 @@ import {
   type Selection,
 } from "./api";
 import { WindChart } from "./charts";
+import { initialTheme, THEME_KEY, type Theme } from "./theme";
 import "./styles.css";
 
 const initialSelection: Selection = {
@@ -61,6 +65,8 @@ const londonStamp = new Intl.DateTimeFormat("en-GB", {
 const dateLabel = (v: string) => londonDay.format(new Date(`${v}T12:00:00Z`));
 const stampLabel = (v: string | null | undefined) =>
   v ? londonStamp.format(new Date(v)) : "Not available";
+const signed = (n: number | null | undefined, digits = 0) =>
+  n == null ? "—" : `${n > 0 ? "+" : ""}${number(n, digits)}`;
 const today = () =>
   new Intl.DateTimeFormat("en-CA", {
     timeZone: "Europe/London",
@@ -117,10 +123,13 @@ function Empty({
 function ForecastPanel({
   report,
   importing,
+  theme,
 }: {
   report: ForecastReport;
   importing: boolean;
+  theme: Theme;
 }) {
+  const change = report.summary.largest_revision;
   return (
     <>
       <div className="report-heading">
@@ -159,21 +168,43 @@ function ForecastPanel({
           }
         />
       </div>
+      <div className="comparison-summary">
+        <div>
+          <p className="context-label">Biggest forecast change</p>
+          <p className="context-detail">
+            {change?.revision_mw === 0
+              ? `All ${report.summary.comparison_count} comparable periods are unchanged from their previous forecast versions.`
+              : change
+                ? `At ${change.local_time}, compared with the previous version published ${stampLabel(change.previous_publish_time)}.`
+                : "No earlier forecast is available for comparison at this decision time."}
+          </p>
+        </div>
+        <p className="revision-value">
+          {change ? `${signed(change.revision_mw)} MW` : "—"}
+          {change?.revision_percent != null && (
+            <span>{signed(change.revision_percent, 1)}%</span>
+          )}
+        </p>
+      </div>
       <section className="chart-card">
         <div className="chart-heading">
           <div>
             <h2>Expected wind generation</h2>
-            <p>
-              How wind output is expected to change through the delivery day.
-            </p>
+            <p>Latest and previous versions available by your decision time.</p>
           </div>
-          <span className="chart-legend">
-            <i className="cyan" />
-            Forecast
-          </span>
+          <div className="legends">
+            <span className="chart-legend">
+              <i className="cyan" />
+              Forecast
+            </span>
+            <span className="chart-legend">
+              <i className="violet dashed" />
+              Previous forecast
+            </span>
+          </div>
         </div>
         {report.summary.forecast_count ? (
-          <WindChart points={report.points} />
+          <WindChart points={report.points} theme={theme} />
         ) : (
           <Empty loading={importing}>
             {importing
@@ -182,7 +213,10 @@ function ForecastPanel({
           </Empty>
         )}
         <div className="chart-caption">
-          <span>London time · Power output in MW</span>
+          <span>
+            London time · MW · Compare {report.summary.comparison_count} periods
+            in the tooltip or CSV
+          </span>
           <span>
             {report.summary.forecast_count} of {report.summary.expected_count}{" "}
             forecast periods available
@@ -196,9 +230,11 @@ function ForecastPanel({
 function EvaluationPanel({
   report,
   importing,
+  theme,
 }: {
   report: EvaluationReport;
   importing: boolean;
+  theme: Theme;
 }) {
   const { metrics } = report;
   const bias = metrics.bias;
@@ -224,14 +260,18 @@ function EvaluationPanel({
           label="Average forecast miss"
           value={number(metrics.mae)}
           unit="MW"
-          detail="Average size of the forecast error"
+          detail={
+            metrics.wape == null
+              ? "Relative error unavailable without non-zero actual wind"
+              : `Total absolute miss: ${number(metrics.wape, 1)}% of actual wind (WAPE)`
+          }
           accent
         />
         <Metric
           label="Forecast tendency"
           value={number(bias == null ? null : Math.abs(bias))}
           unit="MW"
-          detail={tendency}
+          detail={`${tendency}${metrics.bias_percent == null ? "" : ` · ${number(Math.abs(metrics.bias_percent), 1)}% of actual wind`}`}
         />
         <Metric
           label="Periods evaluated"
@@ -239,6 +279,22 @@ function EvaluationPanel({
           unit="periods"
           detail={`${number(metrics.coverage, 1)}% of ${number(metrics.expected)} completed periods`}
         />
+      </div>
+      <div className="evaluation-context" aria-label="Historical error context">
+        <div>
+          <p className="context-label">Wind below forecast</p>
+          <p className="context-value">
+            {number(metrics.below_forecast_percent, 1)}
+            <span>% of evaluated periods</span>
+          </p>
+        </div>
+        <div>
+          <p className="context-label">Large historical miss (P90)</p>
+          <p className="context-value">
+            {number(metrics.p90_absolute_error_mw)}
+            <span>MW · 90th percentile of absolute errors</span>
+          </p>
+        </div>
       </div>
       <section className="chart-card">
         <div className="chart-heading">
@@ -261,7 +317,7 @@ function EvaluationPanel({
           </div>
         </div>
         {metrics.matched ? (
-          <WindChart points={report.points} evaluation />
+          <WindChart points={report.points} evaluation theme={theme} />
         ) : (
           <Empty loading={importing}>
             {importing
@@ -271,7 +327,10 @@ function EvaluationPanel({
         )}
         <div className="chart-caption">
           <span>London time · Power output in MW</span>
-          <span>Gaps mean data is unavailable</span>
+          <span>
+            Past errors describe national wind, not a guaranteed future range or
+            purchase quantity.
+          </span>
         </div>
       </section>
     </>
@@ -279,6 +338,7 @@ function EvaluationPanel({
 }
 
 function App() {
+  const [theme, setTheme] = useState<Theme>(initialTheme);
   const [draft, setDraft] = useState<Selection>(initialSelection);
   const [applied, setApplied] = useState<Selection>(initialSelection);
   const [tab, setTab] = useState<Tab>("forecast");
@@ -286,6 +346,17 @@ function App() {
   const [retrying, setRetrying] = useState(false);
   const [notification, setNotification] = useState("");
   const tabs = useRef<(HTMLButtonElement | null)[]>([]);
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document
+      .querySelector('meta[name="theme-color"]')
+      ?.setAttribute("content", theme === "light" ? "#f5f7fb" : "#0b101a");
+    try {
+      localStorage.setItem(THEME_KEY, theme);
+    } catch {
+      /* Keep the toggle usable when storage is blocked. */
+    }
+  }, [theme]);
   const query = useQuery({
     queryKey: ["dashboard", applied.decision_date, applied.decision_time],
     queryFn: ({ signal }) =>
@@ -413,26 +484,43 @@ function App() {
             </span>
             GridBricks<span className="brand-dot">.</span>
           </a>
-          <nav role="tablist" aria-label="Reports">
-            {(["forecast", "evaluation"] as const).map((name, index) => (
-              <button
-                ref={(element) => {
-                  tabs.current[index] = element;
-                }}
-                key={name}
-                type="button"
-                role="tab"
-                id={`tab-${name}`}
-                aria-selected={tab === name}
-                aria-controls={`panel-${name}`}
-                tabIndex={tab === name ? 0 : -1}
-                onClick={() => setTab(name)}
-                onKeyDown={(event) => tabKey(event, index)}
-              >
-                {name === "forecast" ? "Forecast" : "Evaluation"}
-              </button>
-            ))}
-          </nav>
+          <div className="header-actions">
+            <nav role="tablist" aria-label="Reports">
+              {(["forecast", "evaluation"] as const).map((name, index) => (
+                <button
+                  ref={(element) => {
+                    tabs.current[index] = element;
+                  }}
+                  key={name}
+                  type="button"
+                  role="tab"
+                  id={`tab-${name}`}
+                  aria-selected={tab === name}
+                  aria-controls={`panel-${name}`}
+                  tabIndex={tab === name ? 0 : -1}
+                  onClick={() => setTab(name)}
+                  onKeyDown={(event) => tabKey(event, index)}
+                >
+                  {name === "forecast" ? "Forecast" : "Evaluation"}
+                </button>
+              ))}
+            </nav>
+            <button
+              type="button"
+              className="theme-toggle"
+              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+              title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+              onClick={() =>
+                setTheme((previous) => (previous === "dark" ? "light" : "dark"))
+              }
+            >
+              {theme === "dark" ? (
+                <Sun size={18} aria-hidden="true" />
+              ) : (
+                <Moon size={18} aria-hidden="true" />
+              )}
+            </button>
+          </div>
         </div>
       </header>
       <main className="main-shell">
@@ -511,11 +599,16 @@ function App() {
           ) : data ? (
             <>
               {tab === "forecast" ? (
-                <ForecastPanel report={data.forecast} importing={importing} />
+                <ForecastPanel
+                  report={data.forecast}
+                  importing={importing}
+                  theme={theme}
+                />
               ) : (
                 <EvaluationPanel
                   report={data.evaluation}
                   importing={importing}
+                  theme={theme}
                 />
               )}
               <div className="source-row">

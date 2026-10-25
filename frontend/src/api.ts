@@ -55,6 +55,13 @@ export interface EvaluationPoint extends ForecastPoint {
   actual_publish_time: string | null;
   actual_id: number | null;
 }
+export interface ForecastComparisonPoint extends ForecastPoint {
+  previous_mw: number | null;
+  previous_publish_time: string | null;
+  previous_id: number | null;
+  revision_mw: number | null;
+  revision_percent: number | null;
+}
 export interface Report extends Selection {
   as_of: string;
   fingerprint: string;
@@ -64,7 +71,7 @@ export interface ForecastReport extends Report {
   kind: "forecast";
   delivery_date: string;
   native_resolution_minutes: number;
-  points: ForecastPoint[];
+  points: ForecastComparisonPoint[];
   summary: {
     average_mw: number | null;
     minimum: ForecastPoint | null;
@@ -73,6 +80,8 @@ export interface ForecastReport extends Report {
     expected_count: number;
     coverage: number;
     latest_publication: string | null;
+    comparison_count: number;
+    largest_revision: ForecastComparisonPoint | null;
   };
 }
 export interface EvaluationReport extends Report {
@@ -90,6 +99,9 @@ export interface EvaluationReport extends Report {
     matched: number;
     expected: number;
     coverage: number | null;
+    bias_percent: number | null;
+    below_forecast_percent: number | null;
+    p90_absolute_error_mw: number | null;
   };
 }
 export interface Dashboard {

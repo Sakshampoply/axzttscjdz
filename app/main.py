@@ -391,7 +391,15 @@ def export(run_id: str, format: Literal["csv", "json"] = "csv", session: Session
         "availability",
         "alignment",
     ]
-    writer = csv.DictWriter(output, fieldnames=metadata_keys + keys)
+    metric_metadata = {}
+    if "bias_percent" in run.result.get("metrics", {}):
+        metric_metadata = {
+            "window_wape_percent": run.result["metrics"]["wape"],
+            "window_bias_percent": run.result["metrics"]["bias_percent"],
+            "window_below_forecast_percent": run.result["metrics"]["below_forecast_percent"],
+            "window_p90_absolute_error_mw": run.result["metrics"]["p90_absolute_error_mw"],
+        }
+    writer = csv.DictWriter(output, fieldnames=metadata_keys + list(metric_metadata) + keys)
     writer.writeheader()
     for row in points:
         writer.writerow(
@@ -404,6 +412,7 @@ def export(run_id: str, format: Literal["csv", "json"] = "csv", session: Session
                 "evaluation_at": run.result.get("evaluation_at"),
                 "availability": run.result["availability"],
                 "alignment": run.result["alignment"],
+                **metric_metadata,
                 **row,
             }
         )

@@ -1,56 +1,73 @@
-# Free deployment on Vercel and Render
+# Hosting and operations
 
-## Resources and scheduling
+## Existing services
 
-- Vercel: static React frontend, project root `frontend`.
-- Render: one **Free** Docker web service and one **Free** PostgreSQL 17 database in Frankfurt.
-- GitHub Actions: the public repository's `Synchronise Elexon` workflow requests a shared refresh job every five minutes. There is no paid worker or cron service.
+| Component | Host | Address / configuration |
+| --- | --- | --- |
+| React/Vite frontend | Vercel | [gridbricks-wind.vercel.app](https://gridbricks-wind.vercel.app), project root `frontend` |
+| FastAPI backend | Render Free Docker web service | [gridbricks-api.onrender.com](https://gridbricks-api.onrender.com) |
+| PostgreSQL 17 | Render Free, Frankfurt | Private connection from the API; credentials are never committed |
+| Scheduled collection | GitHub Actions | `.github/workflows/synchronise.yml`, shared refresh every five minutes |
 
-`render.yaml` contains only free plans. `REQUEST_DRIVEN_SYNC=true` runs a bounded job processor after a stale dashboard read or manual/scheduled refresh request. Responses use stored results immediately. The runner prioritises current data, then imports history for up to 60 seconds between jobs. It uses a process lock and PostgreSQL advisory lock, plus the same durable leases and dataset locks as the standalone worker. A stopped runner leaves jobs recoverable. No timer depends on an open browser.
+The existing Git integrations build `main`. The Vercel frontend calls the Render API; it does not call Elexon directly. `render.yaml` contains only free plans. There is no paid worker, Redis instance or Render cron job.
 
-**This free setup has no freshness or availability SLA.** GitHub schedules can be delayed, skipped, or disabled after 60 days without repository activity. Render can sleep after 15 idle minutes and cold-start on the next request. Its 750 monthly free instance hours are shared across the workspace, including other apps. Five-minute requests can keep this service awake and consume that allowance. Quota exhaustion can suspend free services. Source delays and failures are visible independently of scheduler delays. The View results action can request stored results while the API is running.
+## Local and hosted queue execution
 
-**Free Render PostgreSQL expires 30 days after creation**, has a 1 GB limit, and no managed backups. The instance created for this build expires **23 November 2026**. It must be replaced or migrated before expiry to preserve application availability. No paid upgrade is enabled by this project. Keep independent logical backups if receipt history and saved assessments must survive expiry; historical published records can be reimported, but original receipt times cannot be recreated. Another PostgreSQL provider can be substituted using `DATABASE_URL` without changing analytics.
+Local Docker runs an independent worker with two-minute checks. The free hosted API instead uses `REQUEST_DRIVEN_SYNC=true`: requests schedule a bounded background runner against the same durable PostgreSQL queue. Current refreshes have priority over historical imports.
 
-References: [Render free limits](https://render.com/docs/free), [GitHub scheduled workflow limits](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
+The hosted runner checks its 60-second budget between jobs; a single job may finish after that budget. Process and database advisory locks prevent concurrent runners. Dataset locks, atomic imports and expiring leases support recovery after process termination. Each subsequent refresh or dashboard read can continue pending work. The browser can close without cancelling stored jobs; the GitHub schedule provides later requests.
 
-## Render setup
+Missing historical selections reuse completed daily imports. The demonstration includes December 2025 through January 2026 and 1 February delivery. Source publication times, original receipt times and saved export evidence remain in PostgreSQL across application redeploys.
 
-1. Create the free database and free web service from `render.yaml`, or create equivalent resources in the dashboard. All resources must explicitly show **Free**.
-2. Set `DATABASE_URL` to the database's **internal** connection string. Keep external inbound database access blocked.
-3. Set `ALLOWED_ORIGINS` to the exact Vercel application origin. Set `REQUEST_DRIVEN_SYNC=true`, `SYNC_INTERVAL_SECONDS=300`, `BOOTSTRAP_DEMO=true`, and `BOOTSTRAP_HISTORY_DAYS=30`.
-4. Deploy. `python -m app.serve` runs Alembic migrations under an advisory lock before starting FastAPI; a paid pre-deploy feature is unnecessary.
-5. Request `/api/refresh` once. Current data is checked first; January and preceding-month history are queued automatically. Additional requests continue pending imports. `/api/data-quality` reports jobs and dataset status.
+## Configuration
 
-The checked-in Docker Compose setup has a separate local worker checking every two minutes. It is an alternative execution mode for the same queue and code. Do not run a paid Render worker for the free deployment.
+| Variable | Purpose / value |
+| --- | --- |
+| `DATABASE_URL` | Private PostgreSQL connection string; secret |
+| `ALLOWED_ORIGINS` | Exact permitted frontend origins; current production is `https://gridbricks-wind.vercel.app` |
+| `VITE_API_BASE_URL` | Public frontend build-time API origin; use the Render origin without a trailing slash |
+| `REQUEST_DRIVEN_SYNC` | `true` for the free hosted API; `false` when using an independent worker |
+| `SYNC_INTERVAL_SECONDS` | `300` hosted, `120` local worker |
+| `REQUEST_JOB_BUDGET_SECONDS` | `60`, checked between hosted jobs |
+| `STALE_AFTER_SECONDS` | `300`; freshness warning threshold |
+| `REFRESH_COOLDOWN_SECONDS` | `60`; public refresh coalescing/cooldown |
+| `JOB_LEASE_SECONDS` | `300`; interrupted work becomes reclaimable |
+| `BOOTSTRAP_DEMO` | `true` to queue December/January once |
+| `BOOTSTRAP_HISTORY_DAYS` | `30` recent days for ongoing accuracy analysis |
 
-## Vercel setup
+Vite's development proxy and same-origin Docker setup can use an empty `VITE_API_BASE_URL`. For a preview deployment, explicitly permit that intended frontend origin on the API. Do not broaden CORS to all origins as a shortcut.
 
-1. Import the public repository as a Vercel project with root `frontend`.
-2. Use the included Vite build configuration and `dist` output.
-3. Set `VITE_API_BASE_URL` to the Render API origin without a trailing slash. This is public configuration, not a secret.
-4. Deploy and set Render's `ALLOWED_ORIGINS` to the resulting Vercel production origin.
-5. Verify the production application loads without owner authentication. Explicitly allow an intended preview origin when testing preview deployments.
+## Recreate the deployment
 
-## Enable scheduled collection
+1. Create equivalent Free Render resources from `render.yaml`, with PostgreSQL and the API in Frankfurt. Set the API's database URL to the internal connection string and leave external database access blocked.
+2. Configure the API variables above. `python -m app.serve` runs Alembic under an advisory lock before starting FastAPI; a paid pre-deploy command is unnecessary.
+3. Import the public repository into Vercel with root `frontend`, Vite build and `dist` output. Configure `VITE_API_BASE_URL`, then deploy.
+4. Set Render's `ALLOWED_ORIGINS` to the resulting Vercel production origin.
+5. Set GitHub repository variable `RENDER_API_URL` to the API origin. The workflow calls the public, rate-limited refresh endpoint without database credentials or an Elexon secret.
+6. Request `POST /api/refresh` once. Inspect `/api/jobs/{id}` and `/api/data-quality` for completion, not merely HTTP acceptance. Later requests continue queued historical imports.
 
-Set the public repository variable `RENDER_API_URL` to the Render API origin. The workflow uses only a public, rate-limited refresh endpoint; it does not need database credentials or an Elexon secret.
+For manual workflow execution:
 
 ```bash
 gh variable set RENDER_API_URL --body https://YOUR-API.onrender.com
 gh workflow run synchronise.yml
 ```
 
-The five-minute schedule is offset from the top of the hour. Concurrency prevents overlapping workflow runs. Its successful HTTP response confirms job acceptance; inspect the job and source check times for successful ingestion. GitHub's standard hosted runners are free for public repositories within its service terms. No recurring Codex automation is required.
+## Free-host limits
 
-## Acceptance checks
+This configuration provides a demonstration deployment with no availability or freshness SLA. Render can sleep after 15 idle minutes; GitHub schedules can be delayed, skipped, or disabled after 60 days without repository activity. Free instance hours are shared across a Render workspace, and repeated refresh requests consume those hours. Other bandwidth, build and service-initiated traffic limits also apply.
 
-- Public application and repository load without signing in.
-- `/health` returns 200; `/api/data-quality` reports `scheduled_requests` mode.
-- A manual refresh is accepted and its job completes; repeated requests share its identity.
-- A GitHub workflow run accepts a refresh while the dashboard is closed.
-- The default decision selects 27 January at 09:00 for 28 January delivery.
-- Evaluation automatically uses the prior 30 decision dates and only completed outcomes known by that moment.
-- Both tabs use one applied date/time and expose no analysis-mode controls.
-- CSV matches its frozen evidence, including source references.
-- Free plan and expiry limitations remain documented; no paid resources are provisioned.
+Free Render PostgreSQL has a 1 GB limit, no managed backups, and expires 30 days after creation. **The current database expires 23 November 2026.** Preserve required data before expiry. Another PostgreSQL database can be substituted through `DATABASE_URL`; no paid upgrade is enabled by this repository. Published source records can be reimported, but original receipt timestamps and saved analyses require a database backup to preserve.
+
+References: [Render free services](https://render.com/docs/free), [GitHub scheduled workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
+
+## Verify a release
+
+- Open the public frontend and repository without owner authentication; `/health` should return 200.
+- The default selection should forecast 28 January using the 27 January 09:00 cutoff.
+- Exactly two report tabs should share one applied selection; draft edits must not alter displayed or exported results.
+- Both themes should style cards, controls, chart axes, lines, tooltips, warnings and loading states. The chosen theme should survive reload when storage is available.
+- Previous forecast versions must predate the same cutoff. Hover a comparable target and check its MW/% revision and publication times.
+- Evaluation must exclude unfinished periods and later publications, and expose percentages, historical frequency and P90 alongside coverage.
+- Downloaded CSV should match the saved report, including comparison fields or window metric metadata. Earlier saved exports must remain readable.
+- Check keyboard navigation, mobile overflow, source warnings and a manual/scheduled refresh through ingestion completion.

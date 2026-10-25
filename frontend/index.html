@@ -4,6 +4,24 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0b101a" />
+    <script>
+      // Apply the saved preference before the first paint; storage can be blocked.
+      (() => {
+        let saved;
+        try {
+          saved = localStorage.getItem("gridbricks-theme-v1");
+        } catch {}
+        const theme =
+          saved === "dark" || saved === "light"
+            ? saved
+            : matchMedia("(prefers-color-scheme: light)").matches
+              ? "light"
+              : "dark";
+        document.documentElement.dataset.theme = theme;
+        document.querySelector('meta[name="theme-color"]').content =
+          theme === "light" ? "#f5f7fb" : "#0b101a";
+      })();
+    </script>
     <meta
       name="description"
       content="Choose a decision time to see the next-day wind forecast and evaluate earlier forecast accuracy."
